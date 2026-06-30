@@ -2,14 +2,34 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'docs.db');
+// On Vercel (and most serverless hosts) the deployed code directory is
+// READ-ONLY — only /tmp is writable. SQLite's default (and WAL) journal
+// modes need to write small -wal/-shm files next to the .db file, which
+// fails there with SQLITE_CANTOPEN. So: if we're not able to write next to
+// the configured DB_PATH, copy the (read-only) bundled database into /tmp
+// once per cold start and open it from there instead.
+const CONFIGURED_DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'data', 'docs.db');
 
-// Make sure the data/ folder exists before SQLite tries to create the file in it
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+function resolveDbPath(): string {
+  const dir = path.dirname(CONFIGURED_DB_PATH);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.accessSync(dir, fs.constants.W_OK);
+    return CONFIGURED_DB_PATH; // local dev: directory is writable, use it directly
+  } catch {
+    // Read-only filesystem (serverless). Copy into /tmp once.
+    const tmpPath = path.join('/tmp', 'docs.db');
+    if (!fs.existsSync(tmpPath)) {
+      fs.copyFileSync(CONFIGURED_DB_PATH, tmpPath);
+    }
+    return tmpPath;
+  }
+}
+
+const DB_PATH = resolveDbPath();
 
 export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
-
 // One row per chunk. `embedding` is stored as a JSON-encoded float array —
 // this is the "vector" half of "vector + metadata" from the architecture doc.
 // `source_url`, `source_title`, and `section` are the metadata half, and are
